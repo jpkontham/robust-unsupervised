@@ -12,7 +12,11 @@ benchmark.config.resolution = config.resolution
 print(config.name)
 timestamp = datetime.datetime.now().isoformat(timespec="seconds").replace(":", "")
 
-G = open_generator(config.pkl_path) 
+G, D = open_models(args.network_pkl)
+
+# Optional: Print to verify StyleGAN3 structure
+print(f"Generator type: {type(G)}") 
+print(f"Discriminator type: {type(D)}")
 loss_fn = MultiscaleLPIPS()
 
 
