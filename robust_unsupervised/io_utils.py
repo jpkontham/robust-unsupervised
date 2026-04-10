@@ -9,23 +9,26 @@ import contextlib
 import PIL.Image as Image
 
 
-def open_generator(pkl_path: str, refresh=True, float=True, ema=True) -> networks.Generator:
-    print(f"Loading generator from {pkl_path}...")
+def open_models(pkl_path: str, float=True, ema=True):
+    print(f"Loading StyleGAN3 models from {pkl_path}...")
 
     with dnnlib.util.open_url(pkl_path) as fp:
-        G = legacy.load_network_pkl(fp)["G_ema" if ema else "G"].cuda().eval()
+        # StyleGAN .pkl files are dictionaries containing G, D, and G_ema
+        data = legacy.load_network_pkl(fp)
+        G = data['G_ema' if ema else 'G'].cuda().eval()
+        D = data['D'].cuda().eval()  # This is the "Art Critic" we need for pFID
+
         if float:
             G = G.float()
+            D = D.float()
+            
+    # Strictly freeze weights; we only optimize the latent space 'w'
+    for param in G.parameters():
+        param.requires_grad = False
+    for param in D.parameters():
+        param.requires_grad = False
 
-    if refresh:
-        with torch.no_grad():
-            old_G = G
-            G = networks.Generator(*old_G.init_args, **old_G.init_kwargs).cuda()
-            misc.copy_params_and_buffers(old_G, G, require_all=True)
-            for param in G.parameters():
-                param.requires_grad = False
-
-    return G
+    return G, D
 
 
 def open_image(path: str, resolution: int):
