@@ -1,19 +1,22 @@
 from .prelude import *
 from lpips import LPIPS
 
-
 class MultiscaleLPIPS:
     def __init__(
         self,
+        discriminator: Any,  # NEW: Pass the loaded Discriminator here
         min_loss_res: int = 16,
         level_weights: List[float] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-        l1_weight: float = 0.1
+        l1_weight: float = 0.1,
+        adv_weight: float = 0.005 # NEW: Controls how strictly to enforce realism
     ):
         super().__init__()
         self.min_loss_res = min_loss_res
         self.weights = level_weights
         self.l1_weight = l1_weight
+        self.adv_weight = adv_weight
         self.lpips_network = LPIPS(net="vgg", verbose=False).cuda()
+        self.D = discriminator.cuda().eval() # NEW: Store the Discriminator
 
     def measure_lpips(self, x, y, mask):
         if mask is not None:
@@ -29,26 +32,39 @@ class MultiscaleLPIPS:
 
         losses = []
 
-        if mask is not None:
-            mask = F.interpolate(mask, y.shape[-1], mode="area")
+        # --- NEW: Adversarial Loss (The pFID Fix) ---
+        # Calculate D's score on the high-resolution generated image (x)
+        # Minimizing -D(x) forces the generator to produce realistic textures
+        loss_adv = -self.D(x, None).mean() 
+
+        # Create temporary variables for the downsampling loop 
+        # so we don't overwrite the original tensors.
+        curr_x = x
+        curr_y = y
+        curr_mask = mask
+
+        if curr_mask is not None:
+            curr_mask = F.interpolate(curr_mask, curr_y.shape[-1], mode="area")
 
         for weight in self.weights:
             # At extremely low resolutions, LPIPS stops making sense, so omit those
-            if y.shape[-1] <= self.min_loss_res:
+            if curr_y.shape[-1] <= self.min_loss_res:
                 break
             
             if weight > 0:
-                loss = self.measure_lpips(x, y, mask)
+                loss = self.measure_lpips(curr_x, curr_y, curr_mask)
                 losses.append(weight * loss)
 
-            if mask is not None:
-                mask = F.avg_pool2d(mask, 2)
+            if curr_mask is not None:
+                curr_mask = F.avg_pool2d(curr_mask, 2)
 
-            x = F.avg_pool2d(x, 2)
-            x_clean = F.avg_pool2d(x_clean, 2)
-            y = F.avg_pool2d(y, 2)
+            curr_x = F.avg_pool2d(curr_x, 2)
+            curr_y = F.avg_pool2d(curr_y, 2)
         
         total = torch.stack(losses).sum(dim=0) if len(losses) > 0 else 0.0
-        l1 = self.l1_weight * F.l1_loss(x, y)
+        
+        # L1 is computed on the lowest resolution (curr_x, curr_y)
+        l1 = self.l1_weight * F.l1_loss(curr_x, curr_y)
 
-        return total + l1
+        # --- NEW: Return Fidelity + Realism ---
+        return total + l1 + (self.adv_weight * loss_adv)
