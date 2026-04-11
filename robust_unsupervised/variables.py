@@ -28,11 +28,18 @@ class Variable(nn.Module):
     def to_image(self):
         return self.render_image(self.to_input_tensor())
 
-    def render_image(self, ws: torch.Tensor): # todo 
+    def render_image(self, ws: torch.Tensor): 
         """
+        Modified for StyleGAN3:
         ws shape: [batch_size, num_layers, 512]
+        Note: noise_mode is removed as StyleGAN3 handles stochasticity internally.
         """
-        return (self.G.synthesis(ws, noise_mode="const", force_fp32=True) + 1.0) / 2.0
+        # StyleGAN3 synthesis doesn't use noise_mode; we keep force_fp32 for precision 
+        # during the optimization phase of your project.
+        img = self.G.synthesis(ws, force_fp32=True)
+        
+        # Normalize from [-1, 1] to [0, 1] for visualization/LPIPS
+        return (img + 1.0) / 2.0
 
     def detach(self):
         data = self.data.detach().requires_grad_(self.data.requires_grad)
@@ -95,7 +102,8 @@ class WVariable(Variable):
     @torch.no_grad()
     def truncate(self, truncation: float=1.0):
         assert 0.0 <= truncation <= 1.0
-        self.data.lerp_(self.G.mapping.w_avg.reshape(1, 512), 1.0 - truncation)
+        # CHANGE: Use self.G.w_dim instead of 512
+        self.data.lerp_(self.G.mapping.w_avg.reshape(1, self.G.w_dim), 1.0 - truncation)
         return self
 
 
@@ -111,16 +119,11 @@ class WpVariable(Variable):
 
     @staticmethod
     def sample_random_from(G: nn.Module, batch_size: int = 1):
-        data = (
-            G.mapping(
-                (torch.randn(batch_size * G.mapping.num_ws, G.z_dim).cuda()),
-                None,
-                skip_w_avg_update=True,
-            )
-            .mean(dim=1)
-            .reshape(batch_size, G.mapping.num_ws, G.w_dim)
-        )
-
+        # CHANGE: Simplified for StyleGAN3
+        z = torch.randn(batch_size, G.z_dim).cuda()
+        # StyleGAN3 mapping network returns [batch, num_ws, w_dim] automatically
+        data = G.mapping(z, None, skip_w_avg_update=True)
+        
         return WpVariable(G, nn.Parameter(data))
 
     def to_input_tensor(self):
@@ -144,7 +147,8 @@ class WpVariable(Variable):
     def truncate(self, truncation=1.0, *, layer_start = 0, layer_end: Optional[int] = None):
         assert 0.0 <= truncation <= 1.0
         mu = self.G.mapping.w_avg
-        target = mu.reshape(1, 1, 512).repeat(1, self.G.mapping.num_ws, 1)
+        # CHANGE: Use self.G.w_dim instead of 512
+        target = mu.reshape(1, 1, self.G.w_dim).repeat(1, self.G.mapping.num_ws, 1)
         self.data[:, layer_start:layer_end].lerp_(target[:, layer_start:layer_end], 1.0 - truncation)
         return self
 
@@ -152,32 +156,35 @@ class WpVariable(Variable):
 class WppVariable(Variable):
     @staticmethod
     def sample_from(G: nn.Module, batch_size: int = 1):
-        data = WVariable.sample_from(G, batch_size).to_input_tensor().repeat(1, 512, 1)
+        # CHANGE: Use G.w_dim instead of 512
+        data = WVariable.sample_from(G, batch_size).to_input_tensor().repeat(1, G.w_dim, 1)
 
         return WppVariable(G, nn.Parameter(data))
 
     @staticmethod
     def sample_random_from(G: nn.Module, batch_size: int = 1):
+        # CHANGE: Use G.w_dim instead of 512
         data = (
             WVariable.sample_random_from(G, batch_size)
             .to_input_tensor()
-            .repeat(1, 512, 1)
+            .repeat(1, G.w_dim, 1)
         )
 
         return WppVariable(G, nn.Parameter(data))
 
-    @staticmethod
+   @staticmethod
     def from_w(W: WVariable):
-        data = W.data.detach().repeat(1, 512 * W.G.num_ws, 1)
+        # CHANGE: Multiply w_dim by num_ws instead of hardcoding 512
+        data = W.data.detach().repeat(1, W.G.w_dim * W.G.num_ws, 1)
 
         return WppVariable(W.G, nn.parameter.Parameter(data))
-
+    @staticmethod
     @staticmethod
     def from_Wp(Wp: WpVariable):
-        data = Wp.data.detach().repeat_interleave(512, dim=1)
+        # CHANGE: Use Wp.G.w_dim instead of 512
+        data = Wp.data.detach().repeat_interleave(Wp.G.w_dim, dim=1)
 
         return WppVariable(Wp.G, nn.parameter.Parameter(data))
-
     def to_input_tensor(self):
         return self.data
 
