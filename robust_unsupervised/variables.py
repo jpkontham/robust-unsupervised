@@ -156,35 +156,31 @@ class WpVariable(Variable):
 class WppVariable(Variable):
     @staticmethod
     def sample_from(G: nn.Module, batch_size: int = 1):
-        # CHANGE: Use G.w_dim instead of 512
+        # Correct: Uses G.w_dim
         data = WVariable.sample_from(G, batch_size).to_input_tensor().repeat(1, G.w_dim, 1)
-
         return WppVariable(G, nn.Parameter(data))
 
     @staticmethod
     def sample_random_from(G: nn.Module, batch_size: int = 1):
-        # CHANGE: Use G.w_dim instead of 512
+        # Correct: Uses G.w_dim
         data = (
             WVariable.sample_random_from(G, batch_size)
             .to_input_tensor()
             .repeat(1, G.w_dim, 1)
         )
-
         return WppVariable(G, nn.Parameter(data))
 
-   @staticmethod
+    @staticmethod # Fixed: Removed extra space/indentation
     def from_w(W: WVariable):
-        # CHANGE: Multiply w_dim by num_ws instead of hardcoding 512
+        # Correct: Dynamically calculated repeat count
         data = W.data.detach().repeat(1, W.G.w_dim * W.G.num_ws, 1)
-
         return WppVariable(W.G, nn.parameter.Parameter(data))
-    @staticmethod
-    @staticmethod
-    def from_Wp(Wp: WpVariable):
-        # CHANGE: Use Wp.G.w_dim instead of 512
-        data = Wp.data.detach().repeat_interleave(Wp.G.w_dim, dim=1)
 
+    @staticmethod # Fixed: Removed double decorator
+    def from_Wp(Wp: WpVariable):
+        # Correct: Using Wp.G.w_dim
+        data = Wp.data.detach().repeat_interleave(Wp.G.w_dim, dim=1)
         return WppVariable(Wp.G, nn.parameter.Parameter(data))
+
     def to_input_tensor(self):
         return self.data
-
