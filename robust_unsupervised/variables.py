@@ -1,5 +1,23 @@
 from .prelude import *
+class StyleGAN3Hook:
+    def __init__(self, G, styles_dict):
+        self.styles = styles_dict
+        self.hooks = []
+        for name, module in G.synthesis.named_modules():
+            if hasattr(module, 'affine'):
+                m_name = name.replace('.', '_')
+                if m_name in self.styles:
+                    h = module.affine.register_forward_hook(self._make_hook(m_name))
+                    self.hooks.append(h)
 
+    def _make_hook(self, name):
+        def hook(module, input, output):
+            return self.styles[name]
+        return hook
+
+    def remove(self):
+        for h in self.hooks:
+            h.remove()
 
 class Variable(nn.Module):
     def __init__(self, G: networks.Generator, data: torch.Tensor):
@@ -28,17 +46,17 @@ class Variable(nn.Module):
     def to_image(self):
         return self.render_image(self.to_input_tensor())
 
-    def render_image(self, ws: torch.Tensor): 
-        """
-        Modified for StyleGAN3:
-        ws shape: [batch_size, num_layers, 512]
-        Note: noise_mode is removed as StyleGAN3 handles stochasticity internally.
-        """
-        # StyleGAN3 synthesis doesn't use noise_mode; we keep force_fp32 for precision 
-        # during the optimization phase of your project.
-        img = self.G.synthesis(ws, force_fp32=True)
+    def render_image(self, ws_or_styles): 
+        if isinstance(ws_or_styles, (dict, nn.ParameterDict)):
+            hooks = StyleGAN3Hook(self.G, ws_or_styles)
+            # Dummy WS is ignored by the hooks
+            batch_size = next(iter(ws_or_styles.values())).shape[0]
+            dummy_ws = torch.zeros(batch_size, self.G.num_ws, self.G.w_dim).cuda()
+            img = self.G.synthesis(dummy_ws, force_fp32=True)
+            hooks.remove()
+        else:
+            img = self.G.synthesis(ws_or_styles, force_fp32=True)
         
-        # Normalize from [-1, 1] to [0, 1] for visualization/LPIPS
         return (img + 1.0) / 2.0
 
     def detach(self):
@@ -181,6 +199,26 @@ class WppVariable(Variable):
         # Correct: Using Wp.G.w_dim
         data = Wp.data.detach().repeat_interleave(Wp.G.w_dim, dim=1)
         return WppVariable(Wp.G, nn.parameter.Parameter(data))
+
+    def to_input_tensor(self):
+        return self.data
+        
+class SVariable(Variable):
+    def __init__(self, G, styles_dict: dict):
+        super().__init__(G, nn.ParameterDict({
+            k.replace('.', '_'): nn.Parameter(v) 
+            for k, v in styles_dict.items()
+        }))
+
+    @staticmethod
+    @torch.no_grad()
+    def from_Wp(Wp: WpVariable):
+        G, ws, styles = Wp.G, Wp.to_input_tensor(), {}
+        for name, module in G.synthesis.named_modules():
+            if hasattr(module, 'affine'):
+                layer_idx = int(name.split('_')[0][1:]) 
+                styles[name] = module.affine(ws[:, layer_idx]).detach()
+        return SVariable(G, styles)
 
     def to_input_tensor(self):
         return self.data
