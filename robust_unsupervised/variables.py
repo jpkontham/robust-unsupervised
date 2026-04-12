@@ -51,7 +51,7 @@ class Variable(nn.Module):
             hooks = StyleGAN3Hook(self.G, ws_or_styles)
             # Dummy WS is ignored by the hooks
             batch_size = next(iter(ws_or_styles.values())).shape[0]
-            dummy_ws = torch.zeros(batch_size, self.G.num_ws, self.G.w_dim).cuda()
+            dummy_ws = torch.zeros(batch_size, self.G.num_ws, self.G.w_dim).to(next(self.G.parameters()).device)
             img = self.G.synthesis(dummy_ws, force_fp32=True)
             hooks.remove()
         else:
@@ -195,8 +195,11 @@ class WppVariable(Variable):
         return WppVariable(W.G, nn.parameter.Parameter(data))
 
     @staticmethod # Fixed: Removed double decorator
+    @torch.no_grad()
     def from_Wp(Wp: WpVariable):
-        # Correct: Using Wp.G.w_dim
+    # Ensure W++ expansion is mathematically aligned with SG3 channels
+    # Wpp usually expands W+ [1, 16, 512] -> [1, ~9000, 512]
+    # We use repeat_interleave based on the model's actual dimensionality
         data = Wp.data.detach().repeat_interleave(Wp.G.w_dim, dim=1)
         return WppVariable(Wp.G, nn.parameter.Parameter(data))
 
@@ -216,8 +219,17 @@ class SVariable(Variable):
         G, ws, styles = Wp.G, Wp.to_input_tensor(), {}
         for name, module in G.synthesis.named_modules():
             if hasattr(module, 'affine'):
-                layer_idx = int(name.split('_')[0][1:]) 
-                styles[name] = module.affine(ws[:, layer_idx]).detach()
+            # ROBUST FIX: Extracting the numeric index more safely
+            # Splitting by '_' and filtering for the numeric part (e.g., 'L0' -> 0)
+               try:
+                # Most SG3 models use 'L0_...' format
+                   layer_idx = int(name.split('_')[0][1:]) 
+               except (ValueError, IndexError):
+                # Fallback for models with different naming schemes
+                   import re
+                   layer_idx = int(re.search(r'\d+', name).group())
+                
+               styles[name] = module.affine(ws[:, layer_idx]).detach()
         return SVariable(G, styles)
 
     def to_input_tensor(self):
