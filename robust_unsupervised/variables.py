@@ -3,21 +3,36 @@ class StyleGAN3Hook:
     def __init__(self, G, styles_dict):
         self.styles = styles_dict
         self.hooks = []
+        
+        # We iterate over synthesis modules because that's where 
+        # the modulated convolutions live.
         for name, module in G.synthesis.named_modules():
+            # In SG3, both SynthesisInput and SynthesisLayer have an 'affine' 
+            # layer that transforms W into the style vector.
             if hasattr(module, 'affine'):
+                # Normalize name to match your SVariable dictionary keys
                 m_name = name.replace('.', '_')
+                
                 if m_name in self.styles:
+                    # We hook the .affine module specifically.
+                    # This intercepts the style right before it enters modulated_conv2d.
                     h = module.affine.register_forward_hook(self._make_hook(m_name))
                     self.hooks.append(h)
 
     def _make_hook(self, name):
+        # We use a closure to lock in the 'name' for each specific layer
         def hook(module, input, output):
+            # We override the output of the affine layer with our 
+            # optimized StyleSpace parameter.
             return self.styles[name]
         return hook
 
     def remove(self):
+        # Crucial for Kaggle: prevents memory leaks and hook-clash 
+        # between different images in your benchmark.
         for h in self.hooks:
             h.remove()
+        self.hooks = []
 
 class Variable(nn.Module):
     def __init__(self, G: networks.Generator, data: torch.Tensor):
