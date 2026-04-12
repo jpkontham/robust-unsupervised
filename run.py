@@ -148,5 +148,14 @@ if __name__ == '__main__':
                     Wp_variable = WpVariable.from_W(W_variable)
                     run_phase("W+", Wp_variable, config.global_lr_scale * 0.02)
 
-                    Wpp_variable = WppVariable.from_Wp(Wp_variable)
-                    run_phase("W++", Wpp_variable, config.global_lr_scale * 0.005)
+                    S_variable = SVariable.from_Wp(Wp_variable)
+                    
+                    # 2. Attach the Hook to G
+                    hook = StyleGAN3Hook(G, S_variable.to_input_tensor())
+                    
+                    # 3. Optimize S-Space (Phase III)
+                    try:
+                        run_phase("S", S_variable, config.global_lr_scale * 0.005)
+                    finally:
+                        # 4. ALWAYS remove hook to prevent memory leaks in the loop
+                        hook.remove()
