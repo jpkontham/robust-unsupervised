@@ -169,4 +169,4 @@ def eval_all_experiments(
 if __name__ == "__main__":
     import sys 
     breakpoint()
-    eval_all_experiments(sys.argv[1] + "/*", ["_W++"])
+    eval_all_experiments(sys.argv[1] + "/*", ["_S"])
