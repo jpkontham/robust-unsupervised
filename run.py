@@ -1,3 +1,7 @@
+import os
+import datetime
+import tqdm
+import torch
 from cli import parse_config
 import glob
 
@@ -5,19 +9,22 @@ import benchmark
 from benchmark import Task, Degradation
 from robust_unsupervised import *
 
-
+# 1. Load config correctly
 config = parse_config()
 benchmark.config.resolution = config.resolution
 
-print(config.name)
+print(f"Project Name: {config.name}")
 timestamp = datetime.datetime.now().isoformat(timespec="seconds").replace(":", "")
 
-G, D = open_models(args.network_pkl)
+# 2. FIX: Changed 'args.network_pkl' to 'config.pkl_path'
+# Also ensuring models are on GPU
+G, D = open_models(config.pkl_path)
+G = G.cuda().eval()
+if D is not None:
+    D = D.cuda().eval()
 
-# Optional: Print to verify StyleGAN3 structure
-print(f"Generator type: {type(G)}") 
-print(f"Discriminator type: {type(D)}")
-loss_fn = MultiscaleLPIPS()
+# 3. Ensure Loss Function is on GPU
+loss_fn = MultiscaleLPIPS().cuda()
 
 
 def run_phase(label: str, variable: Variable, lr: float):        
