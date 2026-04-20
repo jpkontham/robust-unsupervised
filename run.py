@@ -2,120 +2,59 @@ import os
 import datetime
 import tqdm
 import torch
-from cli import parse_config
 import glob
+from torchvision.utils import save_image
 
+# Repo-specific imports
+from cli import parse_config
 import benchmark
 from benchmark import Task, Degradation
 from robust_unsupervised import *
 
-# 1. Load config correctly
+# 1. Load configuration
 config = parse_config()
 benchmark.config.resolution = config.resolution
 
-print(f"Project Name: {config.name}")
+print(f"Project: {config.name}")
 timestamp = datetime.datetime.now().isoformat(timespec="seconds").replace(":", "")
 
-# 2. FIX: Changed 'args.network_pkl' to 'config.pkl_path'
-# Also ensuring models are on GPU
+# 2. Prepare Models & Loss (Force to GPU)
 G, D = open_models(config.pkl_path)
 G = G.cuda().eval()
 if D is not None:
     D = D.cuda().eval()
 
-# 3. Ensure Loss Function is on GPU
 loss_fn = MultiscaleLPIPS().cuda()
 
-
-def run_phase(label: str, variable: Variable, lr: float):        
-    # Run optimization loop
+# 3. Fixed run_phase (now accepts target and degradation)
+def run_phase(label: str, variable: Variable, lr: float, target: torch.Tensor, degradation: Any):        
     optimizer = NGD(variable.parameters(), lr=lr)
     try:
-        for _ in tqdm.tqdm(range(150), desc=label):
+        # Optimization loop (150 iterations)
+        for _ in tqdm.tqdm(range(150), desc=label, leave=False):
             x = variable.to_image()
+            # Calculate loss: comparing degraded prediction vs damaged target
             loss = loss_fn(degradation.degrade_prediction, x, target, degradation.mask).mean()
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
     except KeyboardInterrupt:
         pass
 
-    # Log results
+    # Save results for this phase
     suffix = "_" + label
     pred = resize_for_logging(variable.to_image(), config.resolution)
-
-    approx_degraded_pred = degradation.degrade_prediction(pred)
-    degraded_pred = degradation.degrade_ground_truth(pred)
-
     save_image(pred, f"pred{suffix}.png", padding=0)
-    save_image(degraded_pred, f"degraded_pred{suffix}.png", padding=0)
-
-    save_image(
-        torch.cat([approx_degraded_pred, degraded_pred]),
-        f"degradation_approximation{suffix}.jpg",
-        padding=0,
-    )
-
-    save_image(
-        torch.cat(
-            [
-                ground_truth,
-                resize_for_logging(target, config.resolution),
-                resize_for_logging(degraded_pred, config.resolution),
-                pred,
-            ]
-        ),
-        f"side_by_side{suffix}.jpg",
-        padding=0,
-    )
-    save_image(
-        torch.cat([resize_for_logging(target, config.resolution), pred]),
-        f"result{suffix}.jpg",
-        padding=0,
-    )
-    save_image(
-        torch.cat([target, degraded_pred, (target - degraded_pred).abs()]),
-        f"fidelity{suffix}.jpg",
-        padding=0,
-    )
-    save_image(
-        torch.cat([ground_truth, pred, (ground_truth - pred).abs()]),
-        f"accuracy{suffix}.jpg",
-        padding=0,
-    ) 
-
 
 if __name__ == '__main__':
+    # Task selection logic
     if config.tasks == "single":
         tasks = benchmark.single_tasks
     elif config.tasks == "composed":
         tasks = benchmark.composed_tasks
     elif config.tasks == "all":
         tasks = benchmark.all_tasks
-    elif config.tasks == "custom":
-        # Implement your own degradation here
-        class YourDegradation:
-            def degrade_ground_truth(self, x):
-                "The true degradation you are attempting to invert."
-                raise NotImplementedError
-            
-            def degrade_prediction(self, x):
-                """
-                Differentiable approximation to the degradation in question. 
-                Can be identical to the true degradation if it is invertible.
-                """
-                raise NotImplementedError
-        tasks = [
-            benchmark.Task(
-                constructor=YourDegradation,
-                # These labels are just for the output folder structure
-                name="your_degradation", 
-                category="single", 
-                level="M", 
-            )
-        ]
     else:
         raise Exception("Invalid task name")
     
@@ -123,46 +62,34 @@ if __name__ == '__main__':
         experiment_path = f"out/{config.name}/{timestamp}/{task.category}/{task.name}/{task.level}/"
         
         image_paths = sorted(
-            [
-                os.path.abspath(path)
-                for path in (
-                    glob.glob(config.dataset_path + "/**/*.png", recursive=True)
-                    + glob.glob(config.dataset_path + "/**/*.jpg", recursive=True)
-                    + glob.glob(config.dataset_path + "/**/*.jpeg", recursive=True)
-                    + glob.glob(config.dataset_path + "/**/*.tif", recursive=True)
-                )
-            ]
+            glob.glob(config.dataset_path + "/**/*.png", recursive=True) +
+            glob.glob(config.dataset_path + "/**/*.jpg", recursive=True)
         )
         assert len(image_paths) > 0, "No images found!"
 
         with directory(experiment_path):
-            print(experiment_path)
-            print(os.path.abspath(config.dataset_path))
-
             for j, image_path in enumerate(image_paths):
                 with directory(f"inversions/{j:04d}"):
-                    print(f"- {j:04d}")
-                    
-                    ground_truth = open_image(image_path, config.resolution)
+                    # Load images onto GPU
+                    ground_truth = open_image(image_path, config.resolution).cuda()
                     degradation = task.init_degradation()
-                    save_image(ground_truth, f"ground_truth.png")
-                    target = degradation.degrade_ground_truth(ground_truth)
-                    save_image(target, f"target.png")
+                    target = degradation.degrade_ground_truth(ground_truth).cuda()
                     
+                    save_image(ground_truth, "ground_truth.png")
+                    save_image(target, "target.png")
+                    
+                    # Phase I: W Space
                     W_variable = WVariable.sample_from(G)
-                    run_phase("W", W_variable, config.global_lr_scale * 0.08)
+                    run_phase("W", W_variable, config.global_lr_scale * 0.08, target, degradation)
 
+                    # Phase II: W+ Space
                     Wp_variable = WpVariable.from_W(W_variable)
-                    run_phase("W+", Wp_variable, config.global_lr_scale * 0.02)
+                    run_phase("W+", Wp_variable, config.global_lr_scale * 0.02, target, degradation)
 
+                    # Phase III: S-Space (StyleSpace) with Hook
                     S_variable = SVariable.from_Wp(Wp_variable)
-                    
-                    # 2. Attach the Hook to G
                     hook = StyleGAN3Hook(G, S_variable.to_input_tensor())
-                    
-                    # 3. Optimize S-Space (Phase III)
                     try:
-                        run_phase("S", S_variable, config.global_lr_scale * 0.005)
+                        run_phase("S", S_variable, config.global_lr_scale * 0.005, target, degradation)
                     finally:
-                        # 4. ALWAYS remove hook to prevent memory leaks in the loop
-                        hook.remove()
+                        hook.remove() # Crucial: prevent memory leaks
