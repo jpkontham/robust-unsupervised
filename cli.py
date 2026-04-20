@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import * 
 
 import sys 
-sys.path.append("stylegan2_ada")
+sys.path.append("stylegan3_ada")
 
 
 @dataclass
